@@ -47,6 +47,104 @@ class Interval(ContSet):
     def __repr__(self):
         return f"Interval(inf={self.inf}, sup={self.sup})"
 
+    @property
+    def dim(self):
+        # Dimension is the length of the inf/sup vectors
+        # For a 0-element array (e.g. np.array([]) which has shape (0,)), dim is 0.
+        # For a scalar array (e.g. np.array([5]) which has shape (1,)), dim is 1.
+        if self.inf.ndim == 0 : # Should not happen if constructor enforces array
+            return 0
+        return self.inf.shape[0]
+
+    def is_empty(self):
+        # An interval is empty if any inf > sup.
+        # Based on constructor logic, this means it was created with Interval.empty()
+        # or resulted from an operation that produces an empty interval.
+        if self.inf.size == 0 and self.sup.size == 0: # 0-dim interval (shape (0,))
+            # Conventionally, a 0-dimensional interval might be considered not empty, or its emptiness
+            # is not well-defined by inf > sup if there are no elements to compare.
+            # Let's define it as not empty for consistency (np.any([]) is False).
+            return False
+        return np.any(self.inf > self.sup)
+
+    def __add__(self, other):
+        if self.is_empty():
+            # If self is empty, the result is an empty interval of the same dimension.
+            return Interval.empty(self.dim)
+
+        if isinstance(other, Interval):
+            if other.is_empty():
+                # If other is empty, result is an empty interval.
+                # Dimension should be compatible; use self's dim or other's if self is 0-dim.
+                return Interval.empty(self.dim if self.dim > 0 else other.dim)
+
+            # Dimension compatibility check for Interval + Interval
+            # Both must have same dimension, or one must be scalar-like (dim 1, size 1)
+            # to be broadcast with the other.
+
+            s_dim = self.dim
+            o_dim = other.dim
+            s_size = self.inf.size
+            o_size = other.inf.size
+
+            if s_dim == o_dim:
+                new_inf = self.inf + other.inf
+                new_sup = self.sup + other.sup
+            elif s_dim == 1 and s_size == 1: # self is scalar-like e.g. Interval([0],[1])
+                new_inf = self.inf[0] + other.inf
+                new_sup = self.sup[0] + other.sup
+            elif o_dim == 1 and o_size == 1: # other is scalar-like
+                new_inf = self.inf + other.inf[0]
+                new_sup = self.sup + other.sup[0]
+            else:
+                raise ValueError(f"Dimension mismatch for Interval addition: self dim {s_dim} (size {s_size}), other dim {o_dim} (size {o_size})")
+
+            return Interval(new_inf, new_sup)
+
+        elif isinstance(other, (int, float, np.number, np.ndarray)):
+            other_arr = np.asarray(other)
+
+            # Handle Interval + numeric
+            # If self is scalar-like: Interval([s_inf], [s_sup]) + arr -> Interval(s_inf + arr, s_sup + arr)
+            # If other_arr is scalar: Interval(inf, sup) + scalar -> Interval(inf + scalar, sup + scalar)
+            # If self.inf and other_arr have compatible shapes for broadcasting:
+
+            if self.dim == 1 and self.inf.size == 1 and (other_arr.ndim > 0 and other_arr.size > 1):
+                # Self is scalar-like, other is a non-scalar array
+                new_inf = self.inf[0] + other_arr
+                new_sup = self.sup[0] + other_arr
+            elif other_arr.ndim == 0 or other_arr.size == 1:
+                # Other is a scalar or scalar-like array
+                new_inf = self.inf + other_arr # Broadcasting handles other_arr being scalar
+                new_sup = self.sup + other_arr
+            elif self.inf.shape == other_arr.shape :
+                 # Both are non-scalar arrays of the same shape
+                new_inf = self.inf + other_arr
+                new_sup = self.sup + other_arr
+            elif self.dim == 0 and self.inf.size == 0: # self is Interval([],[]) or Interval.empty(0)
+                # Adding numeric to a 0-dim interval results in a new interval of that numeric's shape
+                # e.g. Interval.empty(0) + 5 -> Interval([5],[5])
+                # e.g. Interval.empty(0) + [1,2] -> Interval([1,2],[1,2])
+                new_inf = np.array([]) + other_arr # relies on numpy's behavior for [] + arr
+                new_sup = np.array([]) + other_arr
+            else:
+                raise ValueError(f"Dimension mismatch or incompatible shapes for Interval + numeric: self.inf shape {self.inf.shape}, other shape {other_arr.shape}")
+
+            return Interval(new_inf, new_sup)
+
+        else:
+            # Precedence check for other ContSet types would go here.
+            # For now, if not Interval or numeric, it's not implemented.
+            return NotImplemented
+
+    def __radd__(self, other):
+        # This handles cases like `numeric + Interval`
+        # We can just call __add__ as it's equipped to handle numeric types for the 'other' argument.
+        if isinstance(other, (int, float, np.number, np.ndarray)):
+            return self.__add__(other)
+        else:
+            return NotImplemented
+
     @staticmethod
     def generate_random(dim, min_val=-10, max_val=10, max_width=5):
         if not isinstance(dim, int) or dim <= 0:
@@ -66,32 +164,13 @@ class Interval(ContSet):
         points_arr = np.asarray(points)
 
         if points_arr.size == 0:
-            # Behavior for empty points is debatable:
-            # 1. Raise error (as in the prompt's example)
-            # 2. Return an empty interval (e.g., Interval.empty(guessed_dim_or_default))
-            # For now, let's stick to raising an error if no points are provided.
-            # If a dimension can be inferred or a default is desired, this could change.
             raise ValueError("Cannot enclose an empty set of points.")
 
         if points_arr.ndim == 1:
-            # If 1D array, treat as a list of points in 1D space
-            # e.g., [1,2,3] -> inf=[1], sup=[3]
-            # np.min/max on a 1D array will produce scalars, Interval constructor handles that.
-             pass # No reshape needed if we want a 1D interval from a list of scalars.
-                     # If points_arr = [p1, p2, p3] (1D array of scalars)
-                     # then inf = min(p1,p2,p3), sup = max(p1,p2,p3) which is a 0-dim array
-                     # The constructor np.array([val]) will make it 1D.
-                     # If it was meant to be points_arr = [[p1x,p1y],[p2x,p2y]] (a 2D array)
-                     # and a 1D array like [1,2,3,4] was passed, it's ambiguous.
-                     # The matlab version `enclosePoints(points)` takes `points` as matrix where each column is a point.
-                     # So `points = [p1_dim1, p2_dim1, ...; p1_dim2, p2_dim2, ...]`
-                     # np.min(points, axis=1) would be correct for that interpretation.
-                     # Let's assume points are (n_points, dim) as per the prompt.
-            points_arr = points_arr.reshape(-1, 1) # Make it (n_points, 1) if it's a flat list.
-                                                 # This makes it consistent for np.min/max(axis=0)
+            points_arr = points_arr.reshape(-1, 1)
 
-        if points_arr.ndim == 0: # Single scalar point
-             points_arr = np.array([[points_arr]]) # Make it a (1,1) array
+        if points_arr.ndim == 0:
+             points_arr = np.array([[points_arr]])
 
         inf = np.min(points_arr, axis=0)
         sup = np.max(points_arr, axis=0)
@@ -99,9 +178,11 @@ class Interval(ContSet):
 
     @staticmethod
     def empty(dim):
-        if not isinstance(dim, int) or dim <= 0:
-            raise ValueError("Dimension must be a positive integer.")
-        # Represent empty by inf > sup
+        if not isinstance(dim, int) or dim < 0: # Allow dim=0 for empty interval
+            raise ValueError("Dimension must be a non-negative integer.")
+        if dim == 0:
+            return Interval(np.array([]), np.array([])) # inf=[], sup=[] for 0-dim
+        # Represent non-0-dim empty by inf > sup
         return Interval(np.ones(dim), np.zeros(dim))
 
     @staticmethod
